@@ -6,9 +6,17 @@
 #include <netinet/in.h>
 
 #define PORT 8080
+#define MAX_MOVES 225
+
+typedef struct {
+    int row;
+    int col;
+} Move;
 
 // Hai vị trí dành cho hai người chơi. -1 nghĩa là chưa có kết nối.
 int players[2] = {-1, -1};
+Move moves[MAX_MOVES];
+int move_count = 0;
 pthread_mutex_t lock = PTHREAD_MUTEX_INITIALIZER;
 
 void send_message(int client_socket, const char *message) {
@@ -32,6 +40,35 @@ int read_command(int client_socket, char *command, size_t size) {
     return 0;  
 }
 
+// Lưu tọa độ đã gửi của cả hai người. Hàm này chạy khi đang giữ khóa.
+void forward_move(int client_socket, int opponent, const char *command) {
+    int row, col;
+    char separator, extra;
+    // Bỏ tiền tố MOVE, đọc hai số có dấu cách hoặc tab ở giữa.
+    if (sscanf(command + 5, "%6d%c%6d %c", &row, &separator, &col, &extra) != 3 ||
+        (separator != ' ' && separator != '\t')) {
+        send_message(client_socket, "ERR use MOVE row col\n");
+        return;
+    }
+
+    for (int i = 0; i < move_count; i++) {
+        if (moves[i].row == row && moves[i].col == col) {
+            send_message(client_socket, "ERR position already used\n");
+            return;
+        }
+    }
+
+    if (move_count == MAX_MOVES) {
+        send_message(client_socket, "ERR move list is full\n");
+        return;
+    }
+
+    moves[move_count].row = row;
+    moves[move_count].col = col;
+    move_count++;
+    send_message(opponent, command);
+}
+
 void *handle_client(void *arg) {
     int seat = arg == &players[0] ? 0 : 1;
     int client_socket = players[seat];
@@ -45,13 +82,14 @@ void *handle_client(void *arg) {
         } else if (opponent == -1) {
             send_message(client_socket, "WAIT for opponent\n");
         } else {
-            send_message(opponent, command);
+            forward_move(client_socket, opponent, command);
         }
         pthread_mutex_unlock(&lock);
     }
 
     pthread_mutex_lock(&lock);
     players[seat] = -1;
+    move_count = 0;
     int opponent = players[1 - seat];
     if (opponent != -1) send_message(opponent, "WAIT opponent disconnected\n");
     pthread_mutex_unlock(&lock);
