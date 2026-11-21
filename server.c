@@ -9,6 +9,7 @@
 
 #define PORT 8080
 #define MAX_CLIENTS 100
+#define BUFFER 1024
 
 int clients[MAX_CLIENTS];
 pthread_mutex_t lock = PTHREAD_MUTEX_INITIALIZER;
@@ -67,7 +68,8 @@ int read_command(int client_socket, char *command, size_t size) {
             command[i] = '\0';
             return READ_OK;
         }
-        if (invalid || too_long) continue;
+
+        if (invalid || too_long) continue; // nếu đã có flag vấn đề thì skip đến cuối
 
         if (c == '\0') {
             invalid = 1;
@@ -77,7 +79,6 @@ int read_command(int client_socket, char *command, size_t size) {
         if (i < size - 1) command[i++] = c;
         else too_long = 1;
     }
-    return READ_INVALID_COMMAND;
 }
 
 void *handle_client(void *arg);
@@ -103,7 +104,7 @@ int main() {
     server_addr.sin_port = htons(PORT);
     server_addr.sin_addr.s_addr = INADDR_ANY;
 
-    if(bind(server_socket, (struct socketadrr*)&server_addr, sizeof(server_addr)) == -1) {
+    if(bind(server_socket, (struct sockadrr*)&server_addr, sizeof(server_addr)) == -1) {
         perror("bind");
         close(server_socket);
         return 1;
@@ -116,7 +117,7 @@ int main() {
     }
 
     printf("Caro server listening on port %d.\n", PORT);
-    fflush(stdout); // nội dung printf có thể vẫn được giữ tại stdout, dùng fflush để đẩy nội dung ra terminal
+    // fflush(stdout); // nội dung printf có thể vẫn được giữ tại stdout, dùng fflush để đẩy nội dung ra terminal
 
     for(int i = 0; i < MAX_CLIENTS; i++) {
         clients[i] = -1;
@@ -171,7 +172,7 @@ int main() {
         session->client_socket = client_socket;
         session->array_index = index;
         pthread_t thread;
-        int result = pthread_create(&thread, NULL, handle_client, &session);
+        int result = pthread_create(&thread, NULL, handle_client, session);
         if (result != 0) {
             // can't create thread
             clients[index] = -1;
@@ -192,5 +193,25 @@ int main() {
 }
 
 void* handle_client(void *arg) {
-
+    ClientSession *session = (ClientSession *) arg;
+    char command[BUFFER];
+    while(1) {
+        int result = read_command(session->client_socket, command, sizeof(command));
+        if(result == READ_OK) {
+            printf("Client %d sent: %s\n", session->client_socket, command);
+        }
+        else if(result == READ_TOO_LONG) {
+            if(send_message(session->client_socket, "ERR command too long, max length 1023\n") == -1) break;
+        }
+        else if(result == READ_INVALID_COMMAND) {
+            if(send_message(session->client_socket, "ERR command had invalid \\0\n") == -1) break;
+        }
+        else break;
+    }
+    pthread_mutex_lock(&lock);
+    clients[session->array_index] = -1;
+    pthread_mutex_unlock(&lock);
+    close(session->client_socket);
+    free(session);
+    return NULL;
 }
