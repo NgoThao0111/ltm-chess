@@ -18,6 +18,8 @@ typedef struct {
     int array_index;
 } ClientSession;
 
+#define SEND_OK 0
+#define SEND_ERROR -1
 int send_message(int client_socket, const char *message) {
     size_t length = strlen(message);
     size_t total_sent = 0;
@@ -32,19 +34,50 @@ int send_message(int client_socket, const char *message) {
     return 0; // gửi thành công
 }
 
+/*
+Ý nghĩa giá trị trả về
+1: đọc thành công 1 lệnh
+0: client ngắt kết nối
+-1: hàm recv gặp lỗi
+-2: lệnh quá dài vượt quá buffer
+-3: lệnh chứa kí tự \0 ko hợp lệ
+-4: lệnh rỗng
+*/
+#define READ_OK 1
+#define READ_DISCONNECTED 0
+#define READ_ERROR -1
+#define READ_TOO_LONG -2
+#define READ_INVALID_COMMAND -3
 int read_command(int client_socket, char *command, size_t size) {
+    if (command == NULL || size < 1) return READ_ERROR;
     size_t i = 0;
-    while (i + 1 < size) {
+    int too_long = 0;
+    int invalid = 0;
+    while (1) {
         char c;
         ssize_t received = recv(client_socket, &c, 1, 0);
-        if (received <= 0 || c == '\0') return 0;
-        command[i++] = c;
-        if (c == '\n') {
-            command[i] = '\0';
-            return 1;
+        if (received == 0) return READ_DISCONNECTED; // client đã ngắt kết nối
+        if (received < 0) {
+            if (errno == EINTR) continue; 
+            return READ_ERROR;
         }
+        if (c == '\n') {
+            if(invalid) return READ_INVALID_COMMAND;
+            if(too_long) return READ_TOO_LONG;
+            command[i] = '\0';
+            return READ_OK;
+        }
+        if (invalid || too_long) continue;
+
+        if (c == '\0') {
+            invalid = 1;
+            continue;
+        }
+
+        if (i < size - 1) command[i++] = c;
+        else too_long = 1;
     }
-    return 0;  
+    return READ_INVALID_COMMAND;
 }
 
 void *handle_client(void *arg);
