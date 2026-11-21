@@ -1,4 +1,5 @@
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
 #include <pthread.h>
@@ -12,6 +13,11 @@
 int clients[MAX_CLIENTS];
 pthread_mutex_t lock = PTHREAD_MUTEX_INITIALIZER;
 
+typedef struct {
+    int client_socket;
+    int array_index;
+} ClientSession;
+
 int send_message(int client_socket, const char *message) {
     size_t length = strlen(message);
     size_t total_sent = 0;
@@ -20,7 +26,7 @@ int send_message(int client_socket, const char *message) {
         // Bình thường khi hàm send gặp lỗi, hệ điều hành có thể phát tín hiệu SIGPIPE -> có thể khiến toàn bộ tiến trình server bị kết thúc, không chỉ client
         ssize_t sent = send(client_socket, message + total_sent, length - total_sent, MSG_NOSIGNAL);
         if(sent > 0) total_sent += sent;
-        else if (sent < 0 && errno == EINTR) continue; // nếu quá trình gửi bị gián đoạn bởi tín hiệu thì tiếp tục gửi
+        else if (sent < 0 && errno == EINTR) continue; // nếu quá trình gửi bị gián đoạn bởi tín hiệu thì error = EINTR, khi đó tiếp tục gửi
         else return -1; // nếu gửi không thành công, trả về -1
     }
     return 0; // gửi thành công
@@ -41,11 +47,7 @@ int read_command(int client_socket, char *command, size_t size) {
     return 0;  
 }
 
-void *handle_client(void *arg) {
-
-    //close(client_socket);
-    return NULL;
-}
+void *handle_client(void *arg);
 
 int main() {
     int server_socket = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
@@ -90,6 +92,15 @@ int main() {
     while (1) {
         int client_socket = accept(server_socket, NULL, NULL);
         if (client_socket == -1) {
+            if (errno == EINTR) {
+                // EINIR là lỗi 1 hàm blocking bị gián đoạn bởi signal, nên không cần kết thúc luôn chương trình
+                continue;
+            }
+            if (errno == ECONNABORTED) {
+                // ECONNABORTED là lỗi khi kết nối mạng đã thiết lập bị ngắt đột ngột do lỗi phần mềm ở phía máy local hoặc do tầng giao thức mạng nội bộ, chứ không phải do lỗi máy chủ
+                // Có thể xảy ra khi client hủy kết nối trước khi accept() hoàn thành.
+                continue;
+            }
             perror("accept");
             break;
         }
@@ -103,27 +114,50 @@ int main() {
                 break;
             }
         }
-        pthread_mutex_unlock(&lock);
         // Nếu index = -1 nghĩa là mảng clients đã đầy, không còn chỗ trống cho client mới
         if (index == -1) {
+            pthread_mutex_unlock(&lock);
             char *message = "ERR server is full\n";
-            // MSG_DONTWAIT: nếu client đã ngắt kết nối, hàm send sẽ không chặn server, server vẫn tiếp tục chạy bình thường
+            // MSG_DONTWAIT: hàm send sẽ không chặn server, server vẫn tiếp tục chạy bình thường
             send(client_socket, message, strlen(message), MSG_DONTWAIT | MSG_NOSIGNAL);
             close(client_socket);
-        } else {
-            pthread_t thread;
-            int result = pthread_create(&thread, NULL, handle_client, &clients[index]);
-            if (result != 0) {
-                fprintf(stderr, "pthread_create: %s\n", strerror(result));
-                pthread_mutex_lock(&lock);
-                clients[index] = -1;
-                pthread_mutex_unlock(&lock);
-                close(client_socket);
-            } else {
-                pthread_detach(thread);
-            }
+            continue;
         }
+        ClientSession *session = malloc(sizeof(ClientSession));
+        if(session == NULL) {
+            // malloc failed
+            clients[index] = -1;
+            pthread_mutex_unlock(&lock);
+            // stderr là luồng xuất lỗi, dùng để in ra các thông báo lỗi, vẫn hiển thị trên terminal nhưng có thể lưu riêng các log gồm các thông báo lỗi ra 1 file riêng
+            fprintf(stderr, "malloc failed: %s\n", strerror(errno));
+            char *message = "ERR server cannot allocate memory for client\n";
+            send(client_socket, message, strlen(message), MSG_DONTWAIT | MSG_NOSIGNAL);
+            close(client_socket);
+            continue;
+        }
+        session->client_socket = client_socket;
+        session->array_index = index;
+        pthread_t thread;
+        int result = pthread_create(&thread, NULL, handle_client, &session);
+        if (result != 0) {
+            // can't create thread
+            clients[index] = -1;
+            pthread_mutex_unlock(&lock);
+            free(session);
+            fprintf(stderr, "pthread_create: %s\n", strerror(result));
+            char *message = "ERR server cannot create thread for client\n";
+            send(client_socket, message, strlen(message), MSG_DONTWAIT | MSG_NOSIGNAL);
+            close(client_socket);
+            continue;
+        }
+        pthread_mutex_unlock(&lock);
+        // pthread_detach() giúp hệ thống tự động giải phóng tài nguyên của thread đó ngay khi nó kết thúc, mà không cần thread khác gọi pthread_join()
+        pthread_detach(thread);
     }
     close(server_socket);
     return 1;
+}
+
+void* handle_client(void *arg) {
+
 }
