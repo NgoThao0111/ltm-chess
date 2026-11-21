@@ -6,6 +6,7 @@
 #include <sys/socket.h>
 #include <netinet/in.h>
 #include <errno.h>
+#include <ctype.h> 
 
 #define PORT 8080
 #define MAX_CLIENTS 100
@@ -19,15 +20,24 @@ typedef struct {
     int array_index;
 } ClientSession;
 
+#define USER_FILE "users.txt"   // file lưu tài khoản
+#define NAME_LEN 32             // độ dài tối đa của username/password
+
+typedef struct {
+    char username[NAME_LEN];
+    char password[NAME_LEN];
+    int score;
+} Account;
+
 #define SEND_OK 0
 #define SEND_ERROR -1
 int send_message(int client_socket, const char *message) {
-    size_t length = strlen(message);
-    size_t total_sent = 0;
+    int length = strlen(message);
+    int total_sent = 0;
     while(total_sent < length) {
         // MSG_NOSIGNAL: nếu client đã ngắt kết nối, hàm send sẽ không gửi tín hiệu SIGPIPE tới server
         // Bình thường khi hàm send gặp lỗi, hệ điều hành có thể phát tín hiệu SIGPIPE -> có thể khiến toàn bộ tiến trình server bị kết thúc, không chỉ client
-        ssize_t sent = send(client_socket, message + total_sent, length - total_sent, MSG_NOSIGNAL);
+        int sent = send(client_socket, message + total_sent, length - total_sent, MSG_NOSIGNAL);
         if(sent > 0) total_sent += sent;
         else if (sent < 0 && errno == EINTR) continue; // nếu quá trình gửi bị gián đoạn bởi tín hiệu thì error = EINTR, khi đó tiếp tục gửi
         else return -1; // nếu gửi không thành công, trả về -1
@@ -49,14 +59,14 @@ int send_message(int client_socket, const char *message) {
 #define READ_ERROR -1
 #define READ_TOO_LONG -2
 #define READ_INVALID_COMMAND -3
-int read_command(int client_socket, char *command, size_t size) {
+int read_command(int client_socket, char *command, int size) {
     if (command == NULL || size < 1) return READ_ERROR;
-    size_t i = 0;
+    int i = 0;
     int too_long = 0;
     int invalid = 0;
     while (1) {
         char c;
-        ssize_t received = recv(client_socket, &c, 1, 0);
+        int received = recv(client_socket, &c, 1, 0);
         if (received == 0) return READ_DISCONNECTED; // client đã ngắt kết nối
         if (received < 0) {
             if (errno == EINTR) continue; 
@@ -78,6 +88,91 @@ int read_command(int client_socket, char *command, size_t size) {
 
         if (i < size - 1) command[i++] = c;
         else too_long = 1;
+    }
+}
+
+int valid_username(const char *name){
+    int len = strlen(name);
+    if(len ==0 || len>30) {
+        return 0;
+    }
+    for(int i = 0; i< len; i++) {
+        if(!isalnum(name[i])) {  //chữ cái hoặc chữ số
+            return 0;
+        }
+    }
+    return 1;
+}
+
+int valid_password(const char *password) {
+    int len = strlen(password);
+    return len >=1 && len <=30;
+}
+
+int find_account(const char *username, Account *result) {
+    FILE *f = fopen(USER_FILE, "r");
+    if(f == NULL) {
+        return 0;   // chưa có file
+    }
+    Account acc;
+    while (fscanf(f, "%31s %31s %d", acc.username, acc.password, &acc.score) == 3) {
+        if(strcmp(acc.username, username) == 0) {
+            if(result != NULL) *result = acc;
+            fclose(f);
+            return 1;
+        }
+    }
+    fclose(f);
+    return 0;
+}
+
+int add_account(const Account *acc) {
+    FILE *f = fopen(USER_FILE, "a");  // ghi vào cuối file
+    if(f == NULL) {
+        return -1;
+    }
+    fprintf(f, "%s %s %d\n", acc->username, acc->password, acc->score);
+    fclose(f);
+    return 0;
+}
+
+void handle_register(int client_socket, const char *command) {
+    Account acc;
+    if (sscanf(command, "REGISTER %31s %31s", acc.username, acc.password) != 2) {
+        send_message(client_socket, "203 SYNTAX ERROR\n");
+        return;
+    }
+    if (!valid_username(acc.username)) {
+        send_message(client_socket, "201 INVALID USERNAME\n");
+        return;
+    }
+    if (!valid_password(acc.password)) {
+        send_message(client_socket, "202 INVALID PASSWORD\n");
+        return;
+    }
+    acc.score = 0;  // mặc định 0 điểm
+
+    const char *reply;
+    pthread_mutex_lock(&lock);
+    if (find_account(acc.username, NULL)) {
+        reply = "200 USERNAME IN USE\n";
+    } else if (add_account(&acc) == -1) {
+        reply = "999 UNKNOWN ERROR\n";
+    } else {
+        reply = "100 OK\n";
+        printf("New account: %s\n", acc.username);
+        fflush(stdout);
+    }
+    pthread_mutex_unlock(&lock);
+
+    send_message(client_socket, reply);  // gửi sau khi mở khóa
+}
+
+void handle_command(int client_socket, const char *command) {
+    if (strncmp(command, "REGISTER ", 9) == 0) {
+        handle_register(client_socket, command);
+    } else {
+        send_message(client_socket, "204 UNKNOWN COMMAND\n");
     }
 }
 
@@ -104,7 +199,7 @@ int main() {
     server_addr.sin_port = htons(PORT);
     server_addr.sin_addr.s_addr = INADDR_ANY;
 
-    if(bind(server_socket, (struct sockadrr*)&server_addr, sizeof(server_addr)) == -1) {
+    if(bind(server_socket, (struct sockaddr*)&server_addr, sizeof(server_addr)) == -1) {
         perror("bind");
         close(server_socket);
         return 1;
@@ -199,6 +294,8 @@ void* handle_client(void *arg) {
         int result = read_command(session->client_socket, command, sizeof(command));
         if(result == READ_OK) {
             printf("Client %d sent: %s\n", session->client_socket, command);
+            fflush(stdout);
+            handle_command(session->client_socket, command);
         }
         else if(result == READ_TOO_LONG) {
             if(send_message(session->client_socket, "ERR command too long, max length 1023\n") == -1) break;
