@@ -29,6 +29,8 @@ typedef struct {
     int score;
 } Account;
 
+char usernames[MAX_CLIENTS][NAME_LEN];
+
 #define SEND_OK 0
 #define SEND_ERROR -1
 int send_message(int client_socket, const char *message) {
@@ -168,11 +170,75 @@ void handle_register(int client_socket, const char *command) {
     send_message(client_socket, reply);  // gửi sau khi mở khóa
 }
 
-void handle_command(int client_socket, const char *command) {
-    if (strncmp(command, "REGISTER ", 9) == 0) {
-        handle_register(client_socket, command);
+int is_online(const char *username) {
+    for (int i = 0; i < MAX_CLIENTS; i++) {
+        if (strcmp(usernames[i], username) == 0) {
+            return 1;
+        }
+    }
+    return 0;
+}
+
+// LOGIN <username> <password>
+void handle_login(ClientSession *session, const char *command) {
+    char username[NAME_LEN], password[NAME_LEN];
+    if(sscanf(command, "LOGIN %31s %31s", username, password) != 2) {
+        send_message(session->client_socket, "203 SYNTAX ERROR\n");
+        return;
+    }
+
+    char reply[64];
+    Account acc;
+    pthread_mutex_lock(&lock);
+    if (usernames[session->array_index][0] != '\0') {
+        strcpy(reply, "206 ALREADY LOGGED IN\n");
+    } 
+    else if (!find_account(username, &acc) || strcmp(acc.password, password) != 0) {
+        strcpy(reply, "205 WRONG USERNAME OR PASSWORD\n");
+    } 
+    else if (is_online(username)) {
+        strcpy(reply, "207 ACCOUNT IN USE\n");
+    } 
+    else {
+        strcpy(usernames[session->array_index], username);   // ghi nhớ phiên
+        snprintf(reply, sizeof(reply), "100 OK %d\n", acc.score);
+        printf("User %s logged in\n", username);
+        fflush(stdout);
+    }
+    pthread_mutex_unlock(&lock);
+
+    send_message(session->client_socket, reply);
+}
+
+// Xử lý lệnh: LOGOUT
+void handle_logout(ClientSession *session) {
+    const char *reply;
+    pthread_mutex_lock(&lock);
+    if (usernames[session->array_index][0] == '\0') {
+        reply = "208 NOT LOGGED IN\n";
     } else {
-        send_message(client_socket, "204 UNKNOWN COMMAND\n");
+        printf("User %s logged out\n", usernames[session->array_index]);
+        fflush(stdout);
+        usernames[session->array_index][0] = '\0';   // xóa phiên
+        reply = "100 OK\n";
+    }
+    pthread_mutex_unlock(&lock);
+
+    send_message(session->client_socket, reply);
+}
+
+void handle_command(ClientSession *session, const char *command) {
+    if (strncmp(command, "REGISTER ", 9) == 0) {
+        handle_register(session->client_socket, command);
+    }
+    else if(strncmp(command, "LOGIN ", 6) == 0) {
+        handle_login(session, command);
+    }
+    else if(strcmp(command, "LOGOUT") == 0) {
+        handle_logout(session);
+    }
+    else {
+        send_message(session->client_socket, "204 UNKNOWN COMMAND\n");
     }
 }
 
@@ -295,7 +361,7 @@ void* handle_client(void *arg) {
         if(result == READ_OK) {
             printf("Client %d sent: %s\n", session->client_socket, command);
             fflush(stdout);
-            handle_command(session->client_socket, command);
+            handle_command(session, command);
         }
         else if(result == READ_TOO_LONG) {
             if(send_message(session->client_socket, "ERR command too long, max length 1023\n") == -1) break;
@@ -307,6 +373,7 @@ void* handle_client(void *arg) {
     }
     pthread_mutex_lock(&lock);
     clients[session->array_index] = -1;
+    usernames[session->array_index][0] = '\0';
     pthread_mutex_unlock(&lock);
     close(session->client_socket);
     free(session);

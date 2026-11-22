@@ -60,8 +60,7 @@ void user_register(int sock) {
 
     read_input("Tên đăng nhập: ", username, sizeof(username));
     read_input("Mật khẩu: ", password, sizeof(password));
-    if (username[0] == '\0' || password[0] == '\0' ||
-        strchr(username, ' ') != NULL || strchr(password, ' ') != NULL) {
+    if (username[0] == '\0' || password[0] == '\0' || strchr(username, ' ') != NULL || strchr(password, ' ') != NULL) {
         printf("Không được để trống hoặc chứa dấu cách\n");
         return;
     }
@@ -69,16 +68,56 @@ void user_register(int sock) {
     // Tạo lệnh theo giao thức: REGISTER <username> <password>
     snprintf(command, sizeof(command), "REGISTER %s %s\n", username, password);
     if (send_message(sock, command) == -1 || !read_line(sock, reply, sizeof(reply))) {
-        printf("Mất kết nối tới server.\n");
+        printf("Mất kết nối tới server\n");
         return;
     }
 
     // Đổi mã trả về thành thông báo dễ hiểu
-    if (strncmp(reply, "100", 3) == 0)      printf("Đăng ký thành công!\n");
-    else if (strncmp(reply, "200", 3) == 0) printf("Tên đăng nhập đã có người dùng.\n");
+    if (strncmp(reply, "100", 3) == 0)      printf("Đăng ký thành công\n");
+    else if (strncmp(reply, "200", 3) == 0) printf("Tên đăng nhập đã có người dùng\n");
     else if (strncmp(reply, "201", 3) == 0) printf("Tên đăng nhập chỉ gồm chữ cái và số, tối đa 30 ký tự.\n");
-    else if (strncmp(reply, "202", 3) == 0) printf("Mật khẩu tối đa 30 ký tự.\n");
+    else if (strncmp(reply, "202", 3) == 0) printf("Mật khẩu tối đa 30 ký tự\n");
     else                                    printf("Lỗi: %s\n", reply);
+}
+
+int user_login(int sock, char *name) {
+    char username[64], password[64], command[BUFFER], reply[BUFFER];
+    read_input("Tên đăng nhập: ", username, sizeof(username));
+    read_input("Mật khẩu: ", password, sizeof(password));
+    if (username[0] == '\0' || password[0] == '\0' || strchr(username, ' ') != NULL || strchr(password, ' ') != NULL) {
+        printf("Không được để trống hoặc chứa dấu cách\n");
+        return 0;
+    }
+
+    // Tạo lệnh theo giao thức: LOGIN <username> <password>
+    snprintf(command, sizeof(command), "LOGIN %s %s\n", username, password);
+    if (send_message(sock, command) == -1 || !read_line(sock, reply, sizeof(reply))) {
+        printf("Mất kết nối tới server.\n");
+        return 0;
+    }
+
+    if (strncmp(reply, "100", 3) == 0) {
+        int score = 0;
+        sscanf(reply, "100 OK %d", &score);
+        printf("Đăng nhập thành công! Điểm của bạn: %d\n", score);
+        strcpy(name, username);                 // báo cho main biết đã đăng nhập tên gì
+        return 1;
+    }
+    else if (strncmp(reply, "205", 3) == 0) printf("Sai tên đăng nhập hoặc mật khẩu\n");
+    else if (strncmp(reply, "206", 3) == 0) printf("Bạn đã đăng nhập rồi\n");
+    else if (strncmp(reply, "207", 3) == 0) printf("Tài khoản đang được đăng nhập ở chỗ khác\n");
+    else                                    printf("Lỗi: %s\n", reply);
+    return 0;
+}
+
+void user_logout(int sock) {
+    char reply[BUFFER];
+    if (send_message(sock, "LOGOUT\n") == -1 || !read_line(sock, reply, sizeof(reply))) {
+        printf("Mất kết nối tới server.\n");
+        return;
+    }
+    if (strncmp(reply, "100", 3) == 0) printf("Đã đăng xuất.\n");
+    else                               printf("Lỗi: %s\n", reply);
 }
 
 int main () {
@@ -100,15 +139,36 @@ int main () {
     }
 
     char choice[16];
+    char my_name[64] = "";
     while (1)
     {
         printf("\n Game Caro \n");
-        printf("1. Đăng ký\n");
-        printf("0. Thoát\n");
-        read_input("Chọn: ", choice, sizeof(choice));
+        if (my_name[0] == '\0') {
+            // ----- CHƯA ĐĂNG NHẬP -----
+            printf("1. Đăng ký\n");
+            printf("2. Đăng nhập\n");
+            printf("0. Thoát\n");
+            read_input("Chọn: ", choice, sizeof(choice));
 
-        if (strcmp(choice, "1") == 0) user_register(client_socket);
-        else printf("Lựa chọn không hợp lệ\n");
+            if (strcmp(choice, "1") == 0) user_register(client_socket);
+            else if (strcmp(choice, "2") == 0) user_login(client_socket, my_name);
+            else if (strcmp(choice, "0") == 0 || feof(stdin)) break;
+            else printf("Lựa chọn không hợp lệ\n");
+        }
+        else {
+            // ----- ĐÃ ĐĂNG NHẬP -----
+            printf("Xin chào %s\n", my_name);
+            printf("1. Đăng xuất\n");
+            printf("0. Thoát\n");
+            read_input("Chọn: ", choice, sizeof(choice));
+
+            if (strcmp(choice, "1") == 0) {
+                user_logout(client_socket);
+                my_name[0] = '\0';           // quay về menu chưa đăng nhập
+            }
+            else if (strcmp(choice, "0") == 0 || feof(stdin)) break;
+            else printf("Lựa chọn không hợp lệ\n");
+        }
     }
 
     close(client_socket);
